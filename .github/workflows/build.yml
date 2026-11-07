@@ -2,7 +2,12 @@ name: Build APK
 
 on:
   push:
+    tags: ['v*']
+    branches: ['**']
   workflow_dispatch:
+
+permissions:
+  contents: write   # lets the workflow attach the APK to a GitHub Release
 
 jobs:
   build:
@@ -13,7 +18,7 @@ jobs:
       # Works whether you upload the project files, or just OpenGallery.zip.
       - name: Find project (unzip if needed)
         run: |
-          if [ -f OpenGallery.zip ] && [ ! -d app ]; then unzip -q OpenGallery.zip; fi
+          if [ -f OpenGallery.zip ] && [ ! -d app ]; then unzip -oq OpenGallery.zip; fi
           if [ -d OpenGallery/app ]; then echo "PROJECT_DIR=OpenGallery" >> "$GITHUB_ENV"; else echo "PROJECT_DIR=." >> "$GITHUB_ENV"; fi
 
       - uses: actions/setup-java@v4
@@ -35,9 +40,50 @@ jobs:
 
       - name: Build debug APK
         working-directory: ${{ env.PROJECT_DIR }}
-        run: gradle assembleDebug --no-daemon
+        run: |
+          set -o pipefail
+          gradle assembleDebug --no-daemon --console=plain 2>&1 | tee build.log
+
+      # On failure, put the important error lines on the run's Summary page (easy to copy on a phone).
+      - name: Show errors in run summary
+        if: failure()
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          {
+            echo "### Build errors"
+            echo '```'
+            if [ -f build.log ]; then
+              grep -E '^e: |What went wrong|^> |FAILED|error:' build.log | head -60 || true
+            else
+              echo "No build log: an earlier step failed before the build started."
+            fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: build-log
+          path: ${{ env.PROJECT_DIR }}/build.log
+          if-no-files-found: ignore
 
       - uses: actions/upload-artifact@v4
         with:
           name: OpenGallery-debug-apk
           path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
+
+      # Only when you publish a Release / push a tag like v0.32: build the signed release APK and attach it.
+      - name: Build release APK
+        if: startsWith(github.ref, 'refs/tags/v')
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: gradle assembleRelease --no-daemon --console=plain
+
+      - name: Attach APK to the GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          cp app/build/outputs/apk/release/*.apk "OpenGallery-${GITHUB_REF_NAME}.apk"
+          gh release upload "$GITHUB_REF_NAME" "OpenGallery-${GITHUB_REF_NAME}.apk" --clobber --repo "$GITHUB_REPOSITORY" \
+            || gh release create "$GITHUB_REF_NAME" "OpenGallery-${GITHUB_REF_NAME}.apk" --title "OpenGallery ${GITHUB_REF_NAME}" --generate-notes --repo "$GITHUB_REPOSITORY"
